@@ -2,10 +2,12 @@ package com.example.ppt_narrator;
 
 import org.apache.poi.openxml4j.opc.*;
 import org.apache.poi.xslf.usermodel.*;
+
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.beans.factory.annotation.Autowired;
+
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.services.polly.PollyClient;
 import software.amazon.awssdk.services.polly.model.*;
@@ -19,193 +21,272 @@ import java.nio.file.*;
 @SpringBootApplication
 public class PptNarratorApplication implements CommandLineRunner {
 
-	// AWS Polly client (used to generate speech audio)
-	@Autowired
-	private PollyClient polly;
+    @Autowired
+    private PollyClient polly;
 
-	public static void main(String[] args) {
-		SpringApplication.run(PptNarratorApplication.class, args);
-	}
+    // 👉 To keep count of total characters across all slides
+    private int totalCharacters = 0;
 
-	@Override
-	public void run(String... args) throws Exception {
+    public static void main(String[] args) {
+        SpringApplication.run(PptNarratorApplication.class, args);
+    }
 
-		// Check if a PPTX file path is provided in arguments
-		if (args.length == 0) {
-			System.err.println(
-					" Usage: mvn spring-boot:run -Dspring-boot.run.arguments=\"<path-to-pptx> [output-directory]\"");
-			System.exit(1);
-		}
+    @Override
+    public void run(String... args) throws Exception {
 
-		String pptxFile = args[0];
-		String outputDir = args.length > 1 ? args[1] : "slide_audios";
+        if (args.length == 0) {
+            System.err.println(
+                    "❌ Usage: mvn spring-boot:run -Dspring-boot.run.arguments=\"<path-to-pptx>[output-directory]\"");
+            System.exit(1);
+        }
 
-		System.out.println(" Input PPTX: " + pptxFile);
-		System.out.println(" Output Directory: " + outputDir);
+        String pptxFile = args[0];
+        String outputDir = args.length > 1 ? args[1] : "slide_audios";
 
-		// Create folder for saving mp3 files
-		Files.createDirectories(Paths.get(outputDir));
+        System.out.println("📂 Input PPTX: " + pptxFile);
+        System.out.println("🎧 Output Directory: " + outputDir);
 
-		// Create a copy of the original PPTX because we will modify it
-		String outputPptx = pptxFile.replace(".pptx", "_with_audio.pptx");
-		Files.copy(Paths.get(pptxFile), Paths.get(outputPptx), StandardCopyOption.REPLACE_EXISTING);
+        Files.createDirectories(Paths.get(outputDir));
 
-		// Open the copied PPTX
-		try (FileInputStream fis = new FileInputStream(outputPptx);
-				XMLSlideShow ppt = new XMLSlideShow(OPCPackage.open(fis))) {
+        String outputPptx = Paths
+                .get(outputDir, Paths.get(pptxFile).getFileName().toString().replace(".pptx", "_with_audio.pptx"))
+                .toString();
+        Files.copy(Paths.get(pptxFile), Paths.get(outputPptx), StandardCopyOption.REPLACE_EXISTING);
 
-			int slideNum = 1;
+        // try (FileInputStream fis = new FileInputStream(outputPptx);
+        // XMLSlideShow ppt = new XMLSlideShow(OPCPackage.open(fis))) {
 
-			// Loop through each slide in the presentation
-			for (XSLFSlide slide : ppt.getSlides()) {
+        // int slideNum = 1;
 
-				// Extract the notes text from the slide (speaker notes)
-				String notesText = extractNotes(slide);
+        // for (XSLFSlide slide : ppt.getSlides()) {
+        // String notesText = extractNotes(slide);
+        // notesText = cleanNotes(notesText);
+        // // 👉 Count characters
+        // countCharacters(slideNum, notesText);
+        // slideNum++;
+        // }
 
-				// If slide has no notes, skip audio creation
-				if (notesText.isBlank()) {
-					System.out.println("Slide " + slideNum + ": No notes found, skipping audio generation.");
-					slideNum++;
-					continue;
-				}
+        // }
+        // System.out.println("Total Characters : " + totalCharacters);
+        // }
 
-				// Filename for the audio for this slide
-				String audioFileName = outputDir + "/slide_" + slideNum + ".mp3";
-				Path audioPath = Paths.get(audioFileName);
+        try (FileInputStream fis = new FileInputStream(outputPptx);
+                XMLSlideShow ppt = new XMLSlideShow(OPCPackage.open(fis))) {
 
-				// If audio file does NOT exist, generate speech using AWS Polly
-				if (!Files.exists(audioPath)) {
-					SynthesizeSpeechRequest request = SynthesizeSpeechRequest.builder()
-							.text(notesText)
-							.voiceId("Danielle") // Voice used by Polly
-							.outputFormat(OutputFormat.MP3)
-							.build();
+            int slideNum = 1;
 
-					// Create MP3 file
-					try (ResponseInputStream<SynthesizeSpeechResponse> speechStream = polly.synthesizeSpeech(request);
-							OutputStream out = new FileOutputStream(audioFileName)) {
-						speechStream.transferTo(out);
-					}
-					System.out.println(" Generated audio: " + audioFileName);
-				} else {
-					System.out.println(" Using existing audio: " + audioFileName);
-				}
+            for (XSLFSlide slide : ppt.getSlides()) {
 
-				// Embed audio inside the PPTX file
-				OPCPackage pkg = ppt.getPackage();
-				String mediaPath = "/ppt/media/audio" + slideNum + ".mp3";
+                String notesText = extractNotes(slide);
 
-				// Create a part name inside the ppt/media folder
-				PackagePartName mediaPartName = PackagingURIHelper.createPartName(mediaPath);
+                // 👉 Count characters
+                countCharacters(slideNum, notesText);
 
-				// If audio already exists in PPT, remove old one
-				if (pkg.containPart(mediaPartName)) {
-					pkg.removePart(mediaPartName);
-				}
+                String cleanedNotes = cleanNotes(notesText);
 
-				// Create new audio part in PPTX
-				PackagePart mediaPart = pkg.createPart(mediaPartName, "audio/mpeg");
+                if (cleanedNotes.isBlank()) {
 
-				// Copy our MP3 file into the PPTX package
-				try (InputStream is = Files.newInputStream(audioPath);
-						OutputStream os = mediaPart.getOutputStream()) {
-					is.transferTo(os);
-				}
+                    System.out.println("Slide " + slideNum + ": No notes found, skipping audio.");
+                    slideNum++;
+                    continue;
+                }
 
-				// Create relationship between slide and audio part
-				String relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/media";
-				PackageRelationship rel = slide.getPackagePart().addRelationship(mediaPartName, TargetMode.INTERNAL,
-						relType);
-				String relId = rel.getId();
+                String audioFilePath = outputDir + "/slide_" + slideNum + ".mp3";
+                Path audioPath = Paths.get(audioFilePath);
 
-				System.out.println(" Embedded audio for slide " + slideNum + " as relationship id: " + relId);
+                if (!Files.exists(audioPath)) {
 
-				// Read MP3 duration to control slide auto-advance timing
-				Mp3File mp3 = new Mp3File(audioFileName);
-				int durationSeconds = (int) Math.ceil(mp3.getLengthInSeconds());
-				System.out.println(" Duration for slide " + slideNum + ": " + durationSeconds + "s");
+                    SynthesizeSpeechRequest request = SynthesizeSpeechRequest.builder()
+                            .text(cleanedNotes)
+                            .voiceId("Danielle")
+                            .engine("generative")
+                            .outputFormat(OutputFormat.MP3)
+                            .build();
 
-				// Modify slide XML to attach audio and transition timing
-				PackagePart slidePart = slide.getPackagePart();
-				String slideXml;
+                    try (ResponseInputStream<SynthesizeSpeechResponse> stream = polly.synthesizeSpeech(request);
+                            OutputStream out = new FileOutputStream(audioFilePath)) {
 
-				// Read slide XML
-				try (InputStream slideIs = slidePart.getInputStream()) {
-					slideXml = new String(slideIs.readAllBytes(), StandardCharsets.UTF_8);
-				}
+                        stream.transferTo(out);
+                    }
 
-				// Add audio XML snippet referencing the MP3 file
-				String audioSnippet = "  <p:audio xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" "
-						+
-						"xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
-						"    <p:audioFile r:embed=\"" + relId + "\"/>" +
-						"  </p:audio>\n";
+                    System.out.println("✅ Generated audio: " + audioFilePath);
 
-				// Insert audio before closing spTree tag
-				String marker = "</p:spTree>";
-				if (slideXml.contains(marker)) {
-					slideXml = slideXml.replace(marker, audioSnippet + marker);
-				} else {
-					// If structure different, append at end
-					slideXml += "\n" + audioSnippet;
-				}
+                } else {
+                    System.out.println("ℹ️ Using existing audio: " + audioFilePath);
+                }
 
-				// Add/Modify slide transition timing (auto-advance after audio ends)
-				String transitionOpenTag = "<p:transition";
+                // ---------------------------------------------
+                // 📌 Embed audio in ppt/media folder
+                // ---------------------------------------------
+                OPCPackage pkg = ppt.getPackage();
 
-				if (slideXml.contains(transitionOpenTag)) {
-					// Add advTm attribute if transition tag exists
-					slideXml = slideXml.replaceFirst("<p:transition([^>]*)>",
-							"<p:transition$1 advTm=\"" + (durationSeconds * 1000) + "\">");
-				} else {
-					// If no transition tag, insert one inside <p:cSld>
-					String csldMarker = "<p:cSld";
-					int idx = slideXml.indexOf(csldMarker);
+                String mediaPath = "/ppt/media/audio" + slideNum + ".mp3";
+                PackagePartName partName = PackagingURIHelper.createPartName(mediaPath);
 
-					if (idx != -1) {
-						int endOpen = slideXml.indexOf('>', idx);
-						if (endOpen != -1) {
-							String toInsert = "\n  <p:transition advTm=\"" + (durationSeconds * 1000) + "\"/>\n";
-							slideXml = slideXml.substring(0, endOpen + 1) + toInsert + slideXml.substring(endOpen + 1);
-						}
-					} else {
-						// If everything fails, add transition at end
-						slideXml += "\n  <p:transition advTm=\"" + (durationSeconds * 1000) + "\"/>\n";
-					}
-				}
+                if (pkg.containPart(partName)) {
+                    pkg.removePart(partName);
+                }
 
-				// Save updated slide XML back into PPTX
-				try (OutputStream os = slidePart.getOutputStream()) {
-					os.write(slideXml.getBytes(StandardCharsets.UTF_8));
-				}
+                PackagePart audioPart = pkg.createPart(partName, "audio/mpeg");
 
-				System.out.println("🎵 Injected audio element + transition for slide " + slideNum);
+                try (InputStream is = Files.newInputStream(audioPath);
+                        OutputStream os = audioPart.getOutputStream()) {
 
-				slideNum++;
-			}
+                    is.transferTo(os);
+                }
 
-			// Save final PPTX with audio embedded
-			try (FileOutputStream fos = new FileOutputStream(outputPptx)) {
-				ppt.write(fos);
-			}
+                String relType = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/media";
 
-			System.out.println(" All done! Saved: " + outputPptx);
-		}
-	}
+                PackageRelationship rel = slide.getPackagePart()
+                        .addRelationship(partName, TargetMode.INTERNAL, relType);
 
-	// Extracts the speaker notes text from a slide
-	private String extractNotes(XSLFSlide slide) {
-		StringBuilder sb = new StringBuilder();
-		XSLFNotes notes = slide.getNotes();
+                String relId = rel.getId();
 
-		if (notes != null) {
-			for (XSLFShape shape : notes.getShapes()) {
-				if (shape instanceof XSLFTextShape textShape) {
-					sb.append(textShape.getText()).append(" ");
-				}
-			}
-		}
+                System.out.println("🔊 Embedded audio with relId: " + relId);
 
-		return sb.toString().trim();
-	}
+                // ---------------------------------------------
+                // ⏱ Extract MP3 duration (to set auto-advance)
+                // ---------------------------------------------
+                Mp3File mp3 = new Mp3File(audioFilePath);
+                int durationSeconds = (int) Math.ceil(mp3.getLengthInSeconds());
+                int advTimeMs = durationSeconds * 1000;
+
+                System.out.println("⏱ Duration: " + durationSeconds + " seconds");
+
+                // ---------------------------------------------
+                // 📝 Modify slide XML to insert audio + timings
+                // ---------------------------------------------
+                PackagePart slidePart = slide.getPackagePart();
+                String slideXml;
+
+                try (InputStream slideStream = slidePart.getInputStream()) {
+                    slideXml = new String(slideStream.readAllBytes(), StandardCharsets.UTF_8);
+                }
+
+                String audioXml = "<p:audioCdxmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\""
+                        +
+                        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">"
+                        + "<p:st r:embed=\"" + relId + "\"/>"
+                        + "</p:audioCdxmlns:p=>\n";
+
+                // Insert before </p:spTree>
+                if (slideXml.contains("</p:spTree>")) {
+                    slideXml = slideXml.replace("</p:spTree>", audioXml + "</p:spTree>");
+                } else {
+                    slideXml += "\n" + audioXml;
+                }
+
+                // Insert transition timing
+                if (slideXml.contains("<p:transition")) {
+
+                    slideXml = slideXml.replaceFirst(
+                            "<p:transition([^>]*)>",
+                            "<p:transition$1 advTm=\"" + advTimeMs + "\">");
+
+                } else {
+
+                    String marker = "</p:cSld>";
+
+                    if (slideXml.contains(marker)) {
+                        slideXml = slideXml.replace(
+                                marker,
+                                "<p:transition advTm=\"" + advTimeMs + "\"/>" + marker);
+                    }
+                }
+
+                try (OutputStream out = slidePart.getOutputStream()) {
+                    out.write(slideXml.getBytes(StandardCharsets.UTF_8));
+                }
+
+                System.out.println("🎵 Added audio + timing to slide " + slideNum);
+
+                slideNum++;
+            }
+
+            // Save modified PPTX
+            try (FileOutputStream fos = new FileOutputStream(outputPptx)) {
+                ppt.write(fos);
+            }
+
+            System.out.println("🎉 Completed. Saved: " + outputPptx);
+
+            // -------------------------------------------
+            // 👉 Print TOTAL CHARACTER COUNT
+            // -------------------------------------------
+            System.out.println("\n=================================================");
+            System.out.println("🧮 TOTAL characters in all slides' speaker notes: " +
+                    totalCharacters);
+            System.out.println("=================================================\n");
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // 📌 Extract speaker notes
+    // ----------------------------------------------------------------------
+    private String extractNotes(XSLFSlide slide) {
+        StringBuilder sb = new StringBuilder();
+
+        XSLFNotes notes = slide.getNotes();
+
+        if (notes != null) {
+            for (XSLFShape shape : notes.getShapes()) {
+                if (shape instanceof XSLFTextShape ts) {
+                    sb.append(ts.getText()).append(" ");
+                }
+            }
+        }
+
+        return sb.toString().trim();
+    }
+
+    // ------------------------------------------------------------
+    // 🧹 Clean speaker notes (remove unwanted symbols/emojis)
+    // ------------------------------------------------------------
+
+    private static String cleanNotes(String text) {
+        if (text == null)
+            return "";
+        return removeEmojis(text);
+    }
+
+    // ⭐ Correct, modern emoji regex (covers 90%+ emojis)
+    private static final String EMOJI_REGEX = "(?:[\\uD83C\\uDF00-\\uD83D\\uDDFF]|" +
+            "[\\uD83E\\uDD00-\\uD83E\\uDDFF]|" +
+            "[\\uD83D\\uDE00-\\uD83D\\uDE4F]|" +
+            "[\\uD83C\\uDDE6-\\uD83C\\uDDFF]|" +
+            "[\\u2600-\\u26FF]|" +
+            "[\\u2700-\\u27BF]|" +
+            "\\uFE0F|\\u20E3|" +
+            // explicit keycap sequences: digit/#/* + optional VS16 + enclosing keycap
+            "(?:[0-9#*]\\uFE0F?\\u20E3)" // ZWJ sequences (family emojis, profession emojis)
+            + "(?:[\\uD83C-\\uDBFF\\uDC00-\\uDFFF]\\u200D[\\uD83C-\\uDBFF\\uDC00-\\uDFFF])+"
+            + ")";
+
+    public static boolean containsEmoji(String text) {
+        return text.matches(".*(" + EMOJI_REGEX + ").*");
+    }
+
+    public static String removeEmojis(String text) {
+        if (text == null)
+            return "";
+
+        // Remove emojis
+        String cleaned = text.replaceAll(EMOJI_REGEX, "");
+
+        // Remove zero-width joiner (ZWJ)
+        cleaned = cleaned.replace("\u200D", "");
+
+        // Fix multiple spaces
+        cleaned = cleaned.replaceAll("\\s{2,}", " ").trim();
+
+        return cleaned;
+    }
+
+    private void countCharacters(int slideNum, String cleanedText) {
+
+        int count = cleanedText.length();
+        totalCharacters += count;
+
+        System.out.println("📝 Slide " + slideNum + " — Characters: " + count);
+    }
 }
